@@ -264,8 +264,11 @@ public sealed class Plugin : IDalamudPlugin
 
         wasWindowOpen = isWindowOpen;
 
-        if (DateTime.UtcNow - lastRefresh >= RefreshInterval)
+        if (isWindowOpen &&
+            DateTime.UtcNow - lastRefresh >= RefreshInterval)
+        {
             _ = RefreshTrackersAsync();
+        }
     }
 
     private HashSet<int> GetLocalFateIds()
