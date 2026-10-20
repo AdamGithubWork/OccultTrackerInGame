@@ -17,7 +17,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly ICommandManager commandManager;
     private readonly IFramework framework;
-
+    public IClientState ClientState { get; }
     private readonly WindowSystem windowSystem =
         new("PersistentPotsTracker");
 
@@ -44,12 +44,13 @@ public sealed class Plugin : IDalamudPlugin
     public Plugin(
         IDalamudPluginInterface pluginInterface,
         ICommandManager commandManager,
-        IFramework framework)
+        IFramework framework,
+        IClientState clientState)
     {
         this.pluginInterface = pluginInterface;
         this.commandManager = commandManager;
         this.framework = framework;
-
+        ClientState = clientState;
         Configuration =
             pluginInterface.GetPluginConfig() as Configuration
             ?? new Configuration();
@@ -237,14 +238,15 @@ public sealed class Plugin : IDalamudPlugin
             _ => $"Unknown ({tracker.Datacenter})"
         };
 
-        rows.Add(new PotTableRow
-        {
-            Datacenter = datacenter,
-            Zone = zone,
-            NextPot = nextPot,
-            NextSpawnTime = nextSpawnTime
-        });
-    }
+            rows.Add(new PotTableRow
+            {
+                Datacenter = datacenter,
+                Server = tracker.Server,
+                Zone = zone,
+                NextPot = nextPot,
+                NextSpawnTime = nextSpawnTime
+            });
+        }
 
     return rows;
 }

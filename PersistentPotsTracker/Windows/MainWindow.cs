@@ -24,6 +24,14 @@ public class MainWindow : Window
 
     public override void Draw()
     {
+        uint instance = plugin.ClientState.Instance;
+
+        if (plugin.ClientState.IsLoggedIn)
+        {
+            ImGui.Text(instance > 0
+                ? $"Current Instance: {instance}"
+                : "Current Instance: Unknown");
+        }
         DrawDatacenterFilters();
 
         ImGui.Separator();
@@ -121,10 +129,11 @@ public class MainWindow : Window
             ImGuiTableFlags.Sortable |
             ImGuiTableFlags.SortMulti;
 
-        if (!ImGui.BeginTable("PotTimerTable", 4, flags))
+        if (!ImGui.BeginTable("PotTimerTable", 5, flags))
             return;
 
         ImGui.TableSetupColumn("Datacenter");
+        ImGui.TableSetupColumn("Server", ImGuiTableColumnFlags.NoSort);
         ImGui.TableSetupColumn("Zone");
         ImGui.TableSetupColumn("Next Pot");
 
@@ -160,15 +169,15 @@ public class MainWindow : Window
                         ? rows.OrderBy(r => r.Datacenter).ToList()
                         : rows.OrderByDescending(r => r.Datacenter).ToList(),
 
-                    1 => ascending
+                    2 => ascending
                         ? rows.OrderBy(r => r.Zone).ToList()
                         : rows.OrderByDescending(r => r.Zone).ToList(),
 
-                    2 => ascending
+                    3 => ascending
                         ? rows.OrderBy(r => r.NextPot).ToList()
                         : rows.OrderByDescending(r => r.NextPot).ToList(),
 
-                    3 => ascending
+                    4 => ascending
                         ? rows.OrderBy(r => r.NextSpawnTime == 0
                             ? long.MaxValue
                             : r.NextSpawnTime).ToList()
@@ -185,6 +194,9 @@ public class MainWindow : Window
 
             ImGui.TableNextColumn();
             ImGui.Text(row.Datacenter);
+
+            ImGui.TableNextColumn();
+            ImGui.Text(row.Server.ToString());
 
             ImGui.TableNextColumn();
             ImGui.Text(row.Zone);
