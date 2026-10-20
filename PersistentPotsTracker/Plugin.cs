@@ -30,6 +30,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IDataManager dataManager;
     private readonly IFateTable fateTable;
     private readonly IPluginLog pluginLog;
+    private readonly IPlayerState playerState;
 
     public IClientState ClientState { get; }
     public Configuration Configuration { get; }
@@ -39,6 +40,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private readonly MainWindow mainWindow;
     private readonly ConfigWindow configWindow;
+    private readonly PotOverlayWindow potOverlayWindow;
+
     private readonly TrackerApiClient apiClient = new();
 
     private readonly Dictionary<int, string> fateNameCache = new();
@@ -67,7 +70,8 @@ public sealed class Plugin : IDalamudPlugin
         IClientState clientState,
         IDataManager dataManager,
         IFateTable fateTable,
-        IPluginLog pluginLog)
+        IPluginLog pluginLog,
+        IPlayerState playerState)
     {
         this.pluginInterface = pluginInterface;
         this.commandManager = commandManager;
@@ -75,6 +79,7 @@ public sealed class Plugin : IDalamudPlugin
         this.dataManager = dataManager;
         this.fateTable = fateTable;
         this.pluginLog = pluginLog;
+        this.playerState = playerState;
 
         ClientState = clientState;
 
@@ -86,15 +91,17 @@ public sealed class Plugin : IDalamudPlugin
 
         mainWindow = new MainWindow(this);
         configWindow = new ConfigWindow(this);
+        potOverlayWindow = new PotOverlayWindow(this);
 
         windowSystem.AddWindow(mainWindow);
         windowSystem.AddWindow(configWindow);
+        windowSystem.AddWindow(potOverlayWindow);
 
         commandManager.AddHandler(
             CommandName,
             new CommandInfo(OnCommand)
             {
-                HelpMessage = "Open the Occult Tracker window."
+                HelpMessage = "Open Persistent Pots Tracker."
             });
 
         pluginInterface.UiBuilder.Draw += DrawUI;
@@ -125,6 +132,33 @@ public sealed class Plugin : IDalamudPlugin
         configWindow.IsOpen = true;
     }
 
+    public void OpenTrackerWindow()
+    {
+        mainWindow.IsOpen = true;
+    }
+
+    public string GetCurrentDatacenter()
+    {
+        if (!playerState.IsLoaded)
+            return "Unknown";
+
+        var world = playerState.CurrentWorld;
+
+        if (!world.IsValid)
+            return "Unknown";
+
+        uint datacenterId = world.Value.DataCenter.RowId;
+
+        return datacenterId switch
+        {
+            4 => "Aether",
+            5 => "Primal",
+            8 => "Crystal",
+            11 => "Dynamis",
+            _ => "Unknown"
+        };
+    }
+
     private bool IsHornTerritory(uint territoryId)
     {
         var sheet = dataManager.GetExcelSheet<TerritoryType>();
@@ -133,7 +167,8 @@ public sealed class Plugin : IDalamudPlugin
         if (territory == null)
             return false;
 
-        string name = territory.Value.PlaceName.Value.Name.ToString();
+        string name =
+            territory.Value.PlaceName.Value.Name.ToString();
 
         return name.Contains(
                    "South Horn",
@@ -146,11 +181,12 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnTerritoryChanged(uint territoryId)
     {
-        // A previous instance must never remain highlighted.
+        // Never keep a previous instance highlighted
+        // after changing territories.
         SetMatchedTracker(null);
 
-        // Only entering one of the two Horn zones triggers
-        // an additional API refresh.
+        // Only entering North or South Horn triggers
+        // an extra API refresh.
         if (!IsHornTerritory(territoryId))
             return;
 
@@ -196,7 +232,6 @@ public sealed class Plugin : IDalamudPlugin
             PotRows = new();
             MatchedTrackerId = null;
             ApiError = null;
-            refreshOnEntryPending = false;
             return;
         }
 
@@ -250,6 +285,8 @@ public sealed class Plugin : IDalamudPlugin
         if (IsRefreshing)
             return;
 
+        // Refresh immediately when entering either Horn,
+        // even when the tracker window is closed.
         if (refreshOnEntryPending)
         {
             refreshOnEntryPending = false;
@@ -264,6 +301,8 @@ public sealed class Plugin : IDalamudPlugin
 
         wasWindowOpen = isWindowOpen;
 
+        // No periodic API refreshes while the main
+        // tracker window is closed.
         if (isWindowOpen &&
             DateTime.UtcNow - lastRefresh >= RefreshInterval)
         {
@@ -333,13 +372,18 @@ public sealed class Plugin : IDalamudPlugin
             var apiFates = tracker.GetFates();
             var apiCEs = tracker.GetEncounters();
 
+            // Compare against the latest API FATE,
+            // rather than the entire historical list.
             var latestFate = apiFates
-                .Where(f => f.SpawnTime > 0 && f.SpawnTime <= now)
+                .Where(f =>
+                    f.SpawnTime > 0 &&
+                    f.SpawnTime <= now)
                 .OrderByDescending(f => f.SpawnTime)
                 .FirstOrDefault();
 
-            bool fateMatch = latestFate != null &&
-                             localFates.Contains(latestFate.FateId);
+            bool fateMatch =
+                latestFate != null &&
+                localFates.Contains(latestFate.FateId);
 
             bool ceMatch = apiCEs.Any(ce =>
                 localCEs.Contains(ce.FateId) &&
