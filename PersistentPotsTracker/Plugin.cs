@@ -50,7 +50,6 @@ public sealed class Plugin : IDalamudPlugin
     public bool IsRefreshing { get; private set; }
     public string? ApiError { get; private set; }
 
-    // Null means we have not identified a unique instance.
     public int? MatchedTrackerId { get; private set; }
 
     private DateTime lastRefresh = DateTime.MinValue;
@@ -59,6 +58,7 @@ public sealed class Plugin : IDalamudPlugin
     private int selectionVersion;
     private bool disposed;
     private bool wasWindowOpen;
+    private bool refreshOnEntryPending;
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
@@ -102,6 +102,7 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.OpenConfigUi += OpenConfigUI;
 
         framework.Update += OnFrameworkUpdate;
+        ClientState.TerritoryChanged += OnTerritoryChanged;
     }
 
     private void OnCommand(string command, string args)
@@ -122,6 +123,38 @@ public sealed class Plugin : IDalamudPlugin
     private void OpenConfigUI()
     {
         configWindow.IsOpen = true;
+    }
+
+    private bool IsHornTerritory(uint territoryId)
+    {
+        var sheet = dataManager.GetExcelSheet<TerritoryType>();
+        var territory = sheet.GetRowOrDefault(territoryId);
+
+        if (territory == null)
+            return false;
+
+        string name = territory.Value.PlaceName.Value.Name.ToString();
+
+        return name.Contains(
+                   "South Horn",
+                   StringComparison.OrdinalIgnoreCase)
+               ||
+               name.Contains(
+                   "North Horn",
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void OnTerritoryChanged(uint territoryId)
+    {
+        // A previous instance must never remain highlighted.
+        SetMatchedTracker(null);
+
+        // Only entering one of the two Horn zones triggers
+        // an additional API refresh.
+        if (!IsHornTerritory(territoryId))
+            return;
+
+        refreshOnEntryPending = true;
     }
 
     public void DatacenterSelectionChanged()
@@ -163,6 +196,7 @@ public sealed class Plugin : IDalamudPlugin
             PotRows = new();
             MatchedTrackerId = null;
             ApiError = null;
+            refreshOnEntryPending = false;
             return;
         }
 
@@ -177,10 +211,8 @@ public sealed class Plugin : IDalamudPlugin
             if (disposed || requestVersion != selectionVersion)
                 return;
 
-            var rows = BuildPotRows(results);
-
             Trackers = results;
-            PotRows = rows;
+            PotRows = BuildPotRows(results);
             ApiError = null;
         }
         catch (Exception ex)
@@ -217,6 +249,13 @@ public sealed class Plugin : IDalamudPlugin
 
         if (IsRefreshing)
             return;
+
+        if (refreshOnEntryPending)
+        {
+            refreshOnEntryPending = false;
+            _ = RefreshTrackersAsync();
+            return;
+        }
 
         bool isWindowOpen = mainWindow.IsOpen;
 
@@ -265,15 +304,18 @@ public sealed class Plugin : IDalamudPlugin
         return ids;
     }
 
-
     private void TryMatchCurrentInstance()
     {
+        if (Trackers.Count == 0)
+        {
+            SetMatchedTracker(null);
+            return;
+        }
+
         var localFates = GetLocalFateIds();
         var localCEs = GetLocalCEIds();
 
-        if (Trackers.Count == 0 ||
-            localFates.Count == 0 ||
-            localCEs.Count == 0)
+        if (localFates.Count == 0 || localCEs.Count == 0)
         {
             SetMatchedTracker(null);
             return;
@@ -302,25 +344,13 @@ public sealed class Plugin : IDalamudPlugin
                 ce.SpawnTime <= now &&
                 ce.DeathTime == 0);
 
-            if (fateMatch || ceMatch)
-            {
-                pluginLog.Information(
-                    $"MATCH DEBUG: Tracker={tracker.Id}, " +
-                    $"FATE match={fateMatch}, " +
-                    $"CE match={ceMatch}");
-            }
-
             if (fateMatch && ceMatch)
                 matches.Add(tracker);
         }
 
-        pluginLog.Information(
-            $"MATCH DEBUG: Matching trackers={matches.Count}");
-
         SetMatchedTracker(
             matches.Count == 1 ? matches[0].Id : null);
     }
-
 
     private void SetMatchedTracker(int? trackerId)
     {
@@ -328,17 +358,6 @@ public sealed class Plugin : IDalamudPlugin
             return;
 
         MatchedTrackerId = trackerId;
-
-        if (trackerId.HasValue)
-        {
-            pluginLog.Information(
-                $"Current instance matched tracker ID {trackerId.Value}");
-        }
-        else
-        {
-            pluginLog.Information(
-                "Current instance match unavailable.");
-        }
     }
 
     private string GetFateName(int fateId)
@@ -519,6 +538,7 @@ public sealed class Plugin : IDalamudPlugin
         disposed = true;
 
         framework.Update -= OnFrameworkUpdate;
+        ClientState.TerritoryChanged -= OnTerritoryChanged;
 
         commandManager.RemoveHandler(CommandName);
 
