@@ -24,14 +24,6 @@ public class MainWindow : Window
 
     public override void Draw()
     {
-        uint instance = plugin.ClientState.Instance;
-
-        if (plugin.ClientState.IsLoggedIn)
-        {
-            ImGui.Text(instance > 0
-                ? $"Current Instance: {instance}"
-                : "Current Instance: Unknown");
-        }
         DrawDatacenterFilters();
 
         ImGui.Separator();
@@ -129,13 +121,15 @@ public class MainWindow : Window
             ImGuiTableFlags.Sortable |
             ImGuiTableFlags.SortMulti;
 
-        if (!ImGui.BeginTable("PotTimerTable", 5, flags))
+        if (!ImGui.BeginTable("PotTimerTable", 6, flags))
             return;
 
         ImGui.TableSetupColumn("Datacenter");
-        ImGui.TableSetupColumn("Server", ImGuiTableColumnFlags.NoSort);
         ImGui.TableSetupColumn("Zone");
+        ImGui.TableSetupColumn("Last/Current CE");
+        ImGui.TableSetupColumn("Last/Current FATE");
         ImGui.TableSetupColumn("Next Pot");
+        ImGui.TableSetupColumn("Countdown");
 
         // Countdown ascending by default.
         ImGui.TableSetupColumn(
@@ -169,15 +163,23 @@ public class MainWindow : Window
                         ? rows.OrderBy(r => r.Datacenter).ToList()
                         : rows.OrderByDescending(r => r.Datacenter).ToList(),
 
-                    2 => ascending
+                    1 => ascending
                         ? rows.OrderBy(r => r.Zone).ToList()
                         : rows.OrderByDescending(r => r.Zone).ToList(),
 
+                    2 => ascending
+                        ? rows.OrderBy(r => r.LastCurrentCE).ToList()
+                        : rows.OrderByDescending(r => r.LastCurrentCE).ToList(),
+
                     3 => ascending
+                        ? rows.OrderBy(r => r.LastCurrentFate).ToList()
+                        : rows.OrderByDescending(r => r.LastCurrentFate).ToList(),
+
+                    4 => ascending
                         ? rows.OrderBy(r => r.NextPot).ToList()
                         : rows.OrderByDescending(r => r.NextPot).ToList(),
 
-                    4 => ascending
+                    5 => ascending
                         ? rows.OrderBy(r => r.NextSpawnTime == 0
                             ? long.MaxValue
                             : r.NextSpawnTime).ToList()
@@ -192,19 +194,23 @@ public class MainWindow : Window
         {
             ImGui.TableNextRow();
 
-            ImGui.TableNextColumn();
-            ImGui.Text(row.Datacenter);
+            ImGui.TableSetColumnIndex(0);
+            ImGui.TextUnformatted(row.Datacenter);
 
-            ImGui.TableNextColumn();
-            ImGui.Text(row.Server.ToString());
+            ImGui.TableSetColumnIndex(1);
+            ImGui.TextUnformatted(row.Zone);
 
-            ImGui.TableNextColumn();
-            ImGui.Text(row.Zone);
+            ImGui.TableSetColumnIndex(2);
+            ImGui.TextUnformatted(row.LastCurrentCE);
 
-            ImGui.TableNextColumn();
-            ImGui.Text(row.NextPot);
+            ImGui.TableSetColumnIndex(3);
+            ImGui.TextUnformatted(row.LastCurrentFate);
 
-            ImGui.TableNextColumn();
+            ImGui.TableSetColumnIndex(4);
+            ImGui.TextUnformatted(row.NextPot);
+
+            ImGui.TableSetColumnIndex(5);
+            // Keep your existing countdown rendering here.
 
             if (row.NextSpawnTime == 0)
             {

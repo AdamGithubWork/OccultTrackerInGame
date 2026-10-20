@@ -29,15 +29,36 @@ public class TrackerData
     [JsonPropertyName("pot_history")]
     public string PotHistoryJson { get; set; } = "[]";
 
+    [JsonPropertyName("fate_history")]
+    public string FateHistoryJson { get; set; } = "[]";
+
+    [JsonPropertyName("encounter_history")]
+    public string EncounterHistoryJson { get; set; } = "[]";
+
     public List<PotData> GetPots()
     {
-        if (string.IsNullOrWhiteSpace(PotHistoryJson))
+        return ParseHistory(PotHistoryJson);
+    }
+
+    public List<PotData> GetFates()
+    {
+        return ParseHistory(FateHistoryJson);
+    }
+
+    public List<PotData> GetEncounters()
+    {
+        return ParseHistory(EncounterHistoryJson);
+    }
+
+    private static List<PotData> ParseHistory(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
             return new();
 
         try
         {
-            return JsonSerializer.Deserialize<List<PotData>>(
-                PotHistoryJson) ?? new();
+            return JsonSerializer.Deserialize<List<PotData>>(json)
+                   ?? new();
         }
         catch (JsonException)
         {
