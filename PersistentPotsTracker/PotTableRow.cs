@@ -2,6 +2,7 @@ namespace PersistentPotsTracker;
 
 public class PotTableRow
 {
+    public int TrackerId { get; set; }
     public string Datacenter { get; set; } = "";
     public string Zone { get; set; } = "";
 

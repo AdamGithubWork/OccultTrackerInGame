@@ -1,4 +1,5 @@
 
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -7,6 +8,7 @@ using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.Game.InstanceContent;
 using Lumina.Excel.Sheets;
 using PersistentPotsTracker.Windows;
 
@@ -16,22 +18,31 @@ public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/pots";
 
+    private static readonly TimeSpan RefreshInterval =
+        TimeSpan.FromSeconds(45);
+
+    private static readonly TimeSpan MatchInterval =
+        TimeSpan.FromSeconds(2);
+
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly ICommandManager commandManager;
     private readonly IFramework framework;
     private readonly IDataManager dataManager;
+    private readonly IFateTable fateTable;
+    private readonly IPluginLog pluginLog;
 
     public IClientState ClientState { get; }
+    public Configuration Configuration { get; }
 
     private readonly WindowSystem windowSystem =
         new("PersistentPotsTracker");
 
     private readonly MainWindow mainWindow;
     private readonly ConfigWindow configWindow;
-
-    public Configuration Configuration { get; }
-
     private readonly TrackerApiClient apiClient = new();
+
+    private readonly Dictionary<int, string> fateNameCache = new();
+    private readonly Dictionary<int, string> ceNameCache = new();
 
     public List<TrackerData> Trackers { get; private set; } = new();
     public List<PotTableRow> PotRows { get; private set; } = new();
@@ -39,25 +50,31 @@ public sealed class Plugin : IDalamudPlugin
     public bool IsRefreshing { get; private set; }
     public string? ApiError { get; private set; }
 
+    // Null means we have not identified a unique instance.
+    public int? MatchedTrackerId { get; private set; }
+
     private DateTime lastRefresh = DateTime.MinValue;
+    private DateTime lastMatchCheck = DateTime.MinValue;
 
-    private static readonly TimeSpan RefreshInterval =
-        TimeSpan.FromSeconds(45);
-
-    private bool disposed;
     private int selectionVersion;
+    private bool disposed;
+    private bool wasWindowOpen;
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
         ICommandManager commandManager,
         IFramework framework,
         IClientState clientState,
-        IDataManager dataManager)
+        IDataManager dataManager,
+        IFateTable fateTable,
+        IPluginLog pluginLog)
     {
         this.pluginInterface = pluginInterface;
         this.commandManager = commandManager;
         this.framework = framework;
         this.dataManager = dataManager;
+        this.fateTable = fateTable;
+        this.pluginLog = pluginLog;
 
         ClientState = clientState;
 
@@ -111,12 +128,14 @@ public sealed class Plugin : IDalamudPlugin
     {
         selectionVersion++;
 
-        PotRows = new();
         Trackers = new();
-
+        PotRows = new();
+        MatchedTrackerId = null;
+        ApiError = null;
         lastRefresh = DateTime.MinValue;
 
-        _ = RefreshTrackersAsync();
+        if (!IsRefreshing)
+            _ = RefreshTrackersAsync();
     }
 
     public async Task RefreshTrackersAsync()
@@ -124,7 +143,7 @@ public sealed class Plugin : IDalamudPlugin
         if (disposed || IsRefreshing)
             return;
 
-        var datacenters = new List<int>();
+        var datacenters = new List<int>(4);
 
         if (Configuration.ShowAether)
             datacenters.Add(4);
@@ -140,14 +159,14 @@ public sealed class Plugin : IDalamudPlugin
 
         if (datacenters.Count == 0)
         {
-            PotRows = new();
             Trackers = new();
+            PotRows = new();
+            MatchedTrackerId = null;
             ApiError = null;
             return;
         }
 
         IsRefreshing = true;
-
         int requestVersion = selectionVersion;
 
         try
@@ -162,126 +181,278 @@ public sealed class Plugin : IDalamudPlugin
 
             Trackers = results;
             PotRows = rows;
-
             ApiError = null;
         }
         catch (Exception ex)
         {
             if (!disposed && requestVersion == selectionVersion)
+            {
                 ApiError = ex.Message;
+                pluginLog.Error(ex, "Failed to refresh trackers.");
+            }
         }
         finally
         {
             IsRefreshing = false;
 
             if (!disposed)
-                lastRefresh = DateTime.UtcNow;
+            {
+                lastRefresh = requestVersion == selectionVersion
+                    ? DateTime.UtcNow
+                    : DateTime.MinValue;
+            }
         }
     }
 
     private void OnFrameworkUpdate(IFramework framework)
     {
-        if (disposed || IsRefreshing)
+        if (disposed)
             return;
 
-        if (DateTime.UtcNow - lastRefresh >= RefreshInterval)
+        if (DateTime.UtcNow - lastMatchCheck >= MatchInterval)
         {
+            lastMatchCheck = DateTime.UtcNow;
+            TryMatchCurrentInstance();
+        }
+
+        if (IsRefreshing)
+            return;
+
+        bool isWindowOpen = mainWindow.IsOpen;
+
+        if (isWindowOpen && !wasWindowOpen)
+            lastRefresh = DateTime.MinValue;
+
+        wasWindowOpen = isWindowOpen;
+
+        if (DateTime.UtcNow - lastRefresh >= RefreshInterval)
             _ = RefreshTrackersAsync();
+    }
+
+    private HashSet<int> GetLocalFateIds()
+    {
+        var ids = new HashSet<int>();
+
+        foreach (var fate in fateTable)
+        {
+            if (fate == null)
+                continue;
+
+            ids.Add((int)fate.FateId);
+        }
+
+        return ids;
+    }
+
+    private unsafe HashSet<int> GetLocalCEIds()
+    {
+        var ids = new HashSet<int>();
+
+        var container = DynamicEventContainer.GetInstance();
+
+        if (container == null)
+            return ids;
+
+        foreach (ref var ce in container->Events)
+        {
+            if (ce.DynamicEventId == 0)
+                continue;
+
+            if (ce.IsActive())
+                ids.Add(ce.DynamicEventId);
+        }
+
+        return ids;
+    }
+
+
+    private void TryMatchCurrentInstance()
+    {
+        var localFates = GetLocalFateIds();
+        var localCEs = GetLocalCEIds();
+
+        if (Trackers.Count == 0 ||
+            localFates.Count == 0 ||
+            localCEs.Count == 0)
+        {
+            SetMatchedTracker(null);
+            return;
+        }
+
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        var matches = new List<TrackerData>();
+
+        foreach (var tracker in Trackers)
+        {
+            var apiFates = tracker.GetFates();
+            var apiCEs = tracker.GetEncounters();
+
+            var latestFate = apiFates
+                .Where(f => f.SpawnTime > 0 && f.SpawnTime <= now)
+                .OrderByDescending(f => f.SpawnTime)
+                .FirstOrDefault();
+
+            bool fateMatch = latestFate != null &&
+                             localFates.Contains(latestFate.FateId);
+
+            bool ceMatch = apiCEs.Any(ce =>
+                localCEs.Contains(ce.FateId) &&
+                ce.SpawnTime > 0 &&
+                ce.SpawnTime <= now &&
+                ce.DeathTime == 0);
+
+            if (fateMatch || ceMatch)
+            {
+                pluginLog.Information(
+                    $"MATCH DEBUG: Tracker={tracker.Id}, " +
+                    $"FATE match={fateMatch}, " +
+                    $"CE match={ceMatch}");
+            }
+
+            if (fateMatch && ceMatch)
+                matches.Add(tracker);
+        }
+
+        pluginLog.Information(
+            $"MATCH DEBUG: Matching trackers={matches.Count}");
+
+        SetMatchedTracker(
+            matches.Count == 1 ? matches[0].Id : null);
+    }
+
+
+    private void SetMatchedTracker(int? trackerId)
+    {
+        if (MatchedTrackerId == trackerId)
+            return;
+
+        MatchedTrackerId = trackerId;
+
+        if (trackerId.HasValue)
+        {
+            pluginLog.Information(
+                $"Current instance matched tracker ID {trackerId.Value}");
+        }
+        else
+        {
+            pluginLog.Information(
+                "Current instance match unavailable.");
         }
     }
 
-    // Resolve regular FATE IDs through FFXIV game data.
     private string GetFateName(int fateId)
     {
-        var sheet = dataManager.GetExcelSheet<Fate>();
+        if (fateNameCache.TryGetValue(fateId, out var cached))
+            return cached;
 
+        var sheet = dataManager.GetExcelSheet<Fate>();
         var fate = sheet.GetRowOrDefault((uint)fateId);
 
-        if (fate == null)
-            return $"FATE {fateId}";
+        string name = fate?.Name.ToString() ?? "";
 
-        string name = fate.Value.Name.ToString();
+        if (string.IsNullOrWhiteSpace(name))
+            name = $"FATE {fateId}";
 
-        return string.IsNullOrWhiteSpace(name)
-            ? $"FATE {fateId}"
-            : name;
+        fateNameCache[fateId] = name;
+        return name;
     }
 
-    // CE IDs use a different ID system.
-    // For now, display their numeric IDs.
     private string GetCEName(int ceId)
     {
-        var sheet = dataManager.GetExcelSheet<DynamicEvent>();
+        if (ceNameCache.TryGetValue(ceId, out var cached))
+            return cached;
+
+        var sheet =
+            dataManager.GetExcelSheet<Lumina.Excel.Sheets.DynamicEvent>();
 
         var ce = sheet.GetRowOrDefault((uint)ceId);
 
-        if (ce == null)
-            return $"CE {ceId}";
+        string name = ce?.Name.ToString() ?? "";
 
-        string name = ce.Value.Name.ToString();
+        if (string.IsNullOrWhiteSpace(name))
+            name = $"CE {ceId}";
 
-        return string.IsNullOrWhiteSpace(name)
-            ? $"CE {ceId}"
-            : name;
+        ceNameCache[ceId] = name;
+        return name;
     }
 
-    // Find the active encounter, or fall back to the
-    // most recently spawned encounter.
     private string GetLastCurrentEncounter(
         List<PotData> history,
-        bool isFate)
+        bool isFate,
+        long now)
     {
-        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        PotData? latestActive = null;
+        PotData? latest = null;
 
-        var active = history
-            .Where(p => p.SpawnTime > 0
-                     && p.SpawnTime <= now
-                     && p.DeathTime == 0)
-            .OrderByDescending(p => p.SpawnTime)
-            .FirstOrDefault();
-
-        if (active != null)
+        foreach (var encounter in history)
         {
-            string name = isFate
-                ? GetFateName(active.FateId)
-                : GetCEName(active.FateId);
+            if (encounter.SpawnTime <= 0 ||
+                encounter.SpawnTime > now)
+                continue;
 
-            return $"{name} (Active)";
+            if (latest == null ||
+                encounter.SpawnTime > latest.SpawnTime)
+            {
+                latest = encounter;
+            }
+
+            if (encounter.DeathTime == 0 &&
+                (latestActive == null ||
+                 encounter.SpawnTime > latestActive.SpawnTime))
+            {
+                latestActive = encounter;
+            }
         }
 
-        var last = history
-            .Where(p => p.SpawnTime > 0
-                     && p.SpawnTime <= now)
-            .OrderByDescending(p => p.SpawnTime)
-            .FirstOrDefault();
+        var selected = latestActive ?? latest;
 
-        if (last != null)
-        {
-            return isFate
-                ? GetFateName(last.FateId)
-                : GetCEName(last.FateId);
-        }
+        if (selected == null)
+            return "Unknown";
 
-        return "Unknown";
+        string name = isFate
+            ? GetFateName(selected.FateId)
+            : GetCEName(selected.FateId);
+
+        return latestActive != null
+            ? $"{name} (Active)"
+            : name;
     }
 
     private List<PotTableRow> BuildPotRows(
         List<TrackerData> trackers)
     {
-        var rows = new List<PotTableRow>();
+        var rows = new List<PotTableRow>(trackers.Count);
 
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         foreach (var tracker in trackers)
         {
             var pots = tracker.GetPots();
+            var fates = tracker.GetFates();
+            var encounters = tracker.GetEncounters();
 
             PotData? lastPot = null;
+            bool hasSouth = false;
+            bool hasNorth = false;
 
             foreach (var pot in pots)
             {
-                if (pot.FateId is not (1976 or 1977 or 2072 or 2073))
-                    continue;
+                switch (pot.FateId)
+                {
+                    case 1976:
+                    case 1977:
+                        hasSouth = true;
+                        break;
+
+                    case 2072:
+                    case 2073:
+                        hasNorth = true;
+                        break;
+
+                    default:
+                        continue;
+                }
 
                 if (pot.SpawnTime <= 0 || pot.SpawnTime > now)
                     continue;
@@ -293,12 +464,11 @@ public sealed class Plugin : IDalamudPlugin
                 }
             }
 
-            string zone = "Unknown";
-
-            if (pots.Exists(p => p.FateId is 1976 or 1977))
-                zone = "South Horn";
-            else if (pots.Exists(p => p.FateId is 2072 or 2073))
-                zone = "North Horn";
+            string zone = hasSouth
+                ? "South Horn"
+                : hasNorth
+                    ? "North Horn"
+                    : "Unknown";
 
             string nextPot = "Unknown";
             long nextSpawnTime = 0;
@@ -324,20 +494,18 @@ public sealed class Plugin : IDalamudPlugin
                 _ => $"Unknown ({tracker.Datacenter})"
             };
 
-            string lastFate = GetLastCurrentEncounter(
-                tracker.GetFates(),
-                true);
-
-            string lastCE = GetLastCurrentEncounter(
-                tracker.GetEncounters(),
-                false);
-
             rows.Add(new PotTableRow
             {
+                TrackerId = tracker.Id,
                 Datacenter = datacenter,
                 Zone = zone,
-                LastCurrentFate = lastFate,
-                LastCurrentCE = lastCE,
+
+                LastCurrentCE = GetLastCurrentEncounter(
+                    encounters, false, now),
+
+                LastCurrentFate = GetLastCurrentEncounter(
+                    fates, true, now),
+
                 NextPot = nextPot,
                 NextSpawnTime = nextSpawnTime
             });

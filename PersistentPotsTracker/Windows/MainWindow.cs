@@ -102,6 +102,15 @@ public class MainWindow : Window
                 $"Instances found: {plugin.Trackers.Count}");
         }
 
+        if (plugin.MatchedTrackerId.HasValue)
+        {
+            ImGui.SameLine();
+
+            ImGui.TextColored(
+                new Vector4(0.3f, 1f, 0.3f, 1f),
+                "Current instance identified");
+        }
+
         if (!string.IsNullOrEmpty(plugin.ApiError))
         {
             ImGui.TextColored(
@@ -129,9 +138,7 @@ public class MainWindow : Window
         ImGui.TableSetupColumn("Last/Current CE");
         ImGui.TableSetupColumn("Last/Current FATE");
         ImGui.TableSetupColumn("Next Pot");
-        ImGui.TableSetupColumn("Countdown");
 
-        // Countdown ascending by default.
         ImGui.TableSetupColumn(
             "Countdown",
             ImGuiTableColumnFlags.DefaultSort);
@@ -140,16 +147,12 @@ public class MainWindow : Window
 
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        // Build one display row per tracker.
         var rows = plugin.PotRows.ToList();
 
-        // Read the current sorting selection.
         var sortSpecs = ImGui.TableGetSortSpecs();
 
         if (sortSpecs.SpecsCount > 0)
         {
-            // SortMulti allows multiple sort columns.
-            // Apply them from lowest to highest priority.
             for (int i = sortSpecs.SpecsCount - 1; i >= 0; i--)
             {
                 var spec = sortSpecs.Specs[i];
@@ -192,10 +195,32 @@ public class MainWindow : Window
 
         foreach (var row in rows)
         {
+            bool isCurrentInstance =
+                plugin.MatchedTrackerId.HasValue &&
+                row.TrackerId == plugin.MatchedTrackerId.Value;
+
             ImGui.TableNextRow();
 
+            if (isCurrentInstance)
+            {
+                ImGui.TableSetBgColor(
+                    ImGuiTableBgTarget.RowBg0,
+                    ImGui.ColorConvertFloat4ToU32(
+                        new Vector4(0.1f, 0.45f, 0.2f, 0.45f)));
+            }
+
             ImGui.TableSetColumnIndex(0);
-            ImGui.TextUnformatted(row.Datacenter);
+
+            if (isCurrentInstance)
+            {
+                ImGui.TextColored(
+                    new Vector4(0.4f, 1f, 0.4f, 1f),
+                    row.Datacenter);
+            }
+            else
+            {
+                ImGui.TextUnformatted(row.Datacenter);
+            }
 
             ImGui.TableSetColumnIndex(1);
             ImGui.TextUnformatted(row.Zone);
@@ -210,7 +235,6 @@ public class MainWindow : Window
             ImGui.TextUnformatted(row.NextPot);
 
             ImGui.TableSetColumnIndex(5);
-            // Keep your existing countdown rendering here.
 
             if (row.NextSpawnTime == 0)
             {
