@@ -1,86 +1,196 @@
-﻿using Dalamud.Game.Command;
-using Dalamud.IoC;
-using Dalamud.Plugin;
-using System.IO;
-using Dalamud.Interface.Windowing;
-using Dalamud.Plugin.Services;
-using SamplePlugin.Windows;
 
-namespace SamplePlugin;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Dalamud.Game.Command;
+using Dalamud.Interface.Windowing;
+using Dalamud.Plugin;
+using Dalamud.Plugin.Services;
+using OccultTracker.Windows;
+
+namespace OccultTracker;
 
 public sealed class Plugin : IDalamudPlugin
 {
-    [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
-    [PluginService] internal static ITextureProvider TextureProvider { get; private set; } = null!;
-    [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
-    [PluginService] internal static IClientState ClientState { get; private set; } = null!;
-    [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
-    [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
-    [PluginService] internal static IPluginLog Log { get; private set; } = null!;
+    private const string CommandName = "/occulttracker";
 
-    private const string CommandName = "/pmycommand";
+    private readonly IDalamudPluginInterface pluginInterface;
+    private readonly ICommandManager commandManager;
+    private readonly IFramework framework;
 
-    public Configuration Configuration { get; init; }
+    private readonly WindowSystem windowSystem =
+        new("OccultTracker");
 
-    public readonly WindowSystem WindowSystem = new("SamplePlugin");
-    private ConfigWindow ConfigWindow { get; init; }
-    private MainWindow MainWindow { get; init; }
+    private readonly MainWindow mainWindow;
+    private readonly ConfigWindow configWindow;
 
-    public Plugin()
+    public Configuration Configuration { get; }
+
+    private readonly TrackerApiClient apiClient = new();
+
+    public List<TrackerData> Trackers { get; private set; } = new();
+
+    public bool IsRefreshing { get; private set; }
+    public string? ApiError { get; private set; }
+
+    private DateTime lastRefresh = DateTime.MinValue;
+
+    private static readonly TimeSpan RefreshInterval =
+        TimeSpan.FromSeconds(45);
+
+    private bool disposed;
+    private int selectionVersion;
+
+    public Plugin(
+        IDalamudPluginInterface pluginInterface,
+        ICommandManager commandManager,
+        IFramework framework)
     {
-        Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        this.pluginInterface = pluginInterface;
+        this.commandManager = commandManager;
+        this.framework = framework;
 
-        // You might normally want to embed resources and load them from the manifest stream
-        var goatImagePath = Path.Combine(PluginInterface.AssemblyLocation.Directory?.FullName!, "goat.png");
+        Configuration =
+            pluginInterface.GetPluginConfig() as Configuration
+            ?? new Configuration();
 
-        ConfigWindow = new ConfigWindow(this);
-        MainWindow = new MainWindow(this, goatImagePath);
+        Configuration.Initialize(pluginInterface);
 
-        WindowSystem.AddWindow(ConfigWindow);
-        WindowSystem.AddWindow(MainWindow);
+        mainWindow = new MainWindow(this);
+        configWindow = new ConfigWindow(this);
 
-        CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
-        {
-            HelpMessage = "A useful message to display in /xlhelp"
-        });
+        windowSystem.AddWindow(mainWindow);
+        windowSystem.AddWindow(configWindow);
 
-        // Tell the UI system that we want our windows to be drawn through the window system
-        PluginInterface.UiBuilder.Draw += WindowSystem.Draw;
+        commandManager.AddHandler(
+            CommandName,
+            new CommandInfo(OnCommand)
+            {
+                HelpMessage = "Open the Occult Tracker window."
+            });
 
-        // This adds a button to the plugin installer entry of this plugin which allows
-        // toggling the display status of the configuration ui
-        PluginInterface.UiBuilder.OpenConfigUi += ToggleConfigUi;
+        pluginInterface.UiBuilder.Draw += DrawUI;
+        pluginInterface.UiBuilder.OpenMainUi += OpenMainUI;
+        pluginInterface.UiBuilder.OpenConfigUi += OpenConfigUI;
 
-        // Adds another button doing the same but for the main ui of the plugin
-        PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
-
-        // Add a simple message to the log with level set to information
-        // Use /xllog to open the log window in-game
-        // Example Output: 00:57:54.959 | INF | [SamplePlugin] ===A cool log message from Sample Plugin===
-        Log.Information($"===A cool log message from {PluginInterface.Manifest.Name}===");
-    }
-
-    public void Dispose()
-    {
-        // Unregister all actions to not leak anything during disposal of plugin
-        PluginInterface.UiBuilder.Draw -= WindowSystem.Draw;
-        PluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;
-        PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
-        
-        WindowSystem.RemoveAllWindows();
-
-        ConfigWindow.Dispose();
-        MainWindow.Dispose();
-
-        CommandManager.RemoveHandler(CommandName);
+        framework.Update += OnFrameworkUpdate;
     }
 
     private void OnCommand(string command, string args)
     {
-        // In response to the slash command, toggle the display status of our main ui
-        MainWindow.Toggle();
+        mainWindow.Toggle();
     }
-    
-    public void ToggleConfigUi() => ConfigWindow.Toggle();
-    public void ToggleMainUi() => MainWindow.Toggle();
+
+    private void DrawUI()
+    {
+        windowSystem.Draw();
+    }
+
+    private void OpenMainUI()
+    {
+        mainWindow.IsOpen = true;
+    }
+
+    private void OpenConfigUI()
+    {
+        configWindow.IsOpen = true;
+    }
+
+    public void DatacenterSelectionChanged()
+    {
+        selectionVersion++;
+
+        // Clear results from the previous selection.
+        Trackers = new();
+
+        // Allow an immediate refresh.
+        lastRefresh = DateTime.MinValue;
+
+        _ = RefreshTrackersAsync();
+    }
+
+    public async Task RefreshTrackersAsync()
+    {
+        if (disposed || IsRefreshing)
+            return;
+
+        var datacenters = new List<int>();
+
+        if (Configuration.ShowAether)
+            datacenters.Add(4);
+
+        if (Configuration.ShowPrimal)
+            datacenters.Add(5);
+
+        if (Configuration.ShowCrystal)
+            datacenters.Add(8);
+
+        if (Configuration.ShowDynamis)
+            datacenters.Add(11);
+
+        if (datacenters.Count == 0)
+        {
+            Trackers = new();
+            ApiError = null;
+            return;
+        }
+
+        IsRefreshing = true;
+
+        int requestVersion = selectionVersion;
+
+        try
+        {
+            var results =
+                await apiClient.GetTrackersAsync(datacenters);
+
+            if (disposed || requestVersion != selectionVersion)
+                return;
+
+            Trackers = results;
+            ApiError = null;
+        }
+        catch (Exception ex)
+        {
+            if (!disposed && requestVersion == selectionVersion)
+                ApiError = ex.Message;
+        }
+        finally
+        {
+            IsRefreshing = false;
+
+            if (!disposed)
+                lastRefresh = DateTime.UtcNow;
+        }
+    }
+
+    private void OnFrameworkUpdate(IFramework framework)
+    {
+        if (disposed || IsRefreshing)
+            return;
+
+        if (DateTime.UtcNow - lastRefresh >= RefreshInterval)
+        {
+            _ = RefreshTrackersAsync();
+        }
+    }
+
+    public void Dispose()
+    {
+        disposed = true;
+
+        framework.Update -= OnFrameworkUpdate;
+
+        commandManager.RemoveHandler(CommandName);
+
+        pluginInterface.UiBuilder.Draw -= DrawUI;
+        pluginInterface.UiBuilder.OpenMainUi -= OpenMainUI;
+        pluginInterface.UiBuilder.OpenConfigUi -= OpenConfigUI;
+
+        windowSystem.RemoveAllWindows();
+
+        // Pending requests may still finish, but their results
+        // will be ignored because disposed is true.
+        apiClient.Dispose();
+    }
 }

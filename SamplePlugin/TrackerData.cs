@@ -1,0 +1,74 @@
+
+using System;
+using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace OccultTracker;
+
+public class TrackerData
+{
+    [JsonPropertyName("id")]
+    public int Id { get; set; }
+
+    [JsonPropertyName("tracker_id")]
+    public string TrackerId { get; set; } = "";
+
+    [JsonPropertyName("datacenter")]
+    public int Datacenter { get; set; }
+
+    [JsonPropertyName("server")]
+    public int Server { get; set; }
+
+    [JsonPropertyName("territory")]
+    public int Territory { get; set; }
+
+    [JsonPropertyName("last_update")]
+    public long LastUpdate { get; set; }
+
+    [JsonPropertyName("pot_history")]
+    public string PotHistoryJson { get; set; } = "[]";
+
+    public List<PotData> GetPots()
+    {
+        if (string.IsNullOrWhiteSpace(PotHistoryJson))
+            return new();
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<PotData>>(
+                PotHistoryJson) ?? new();
+        }
+        catch (JsonException)
+        {
+            return new();
+        }
+    }
+}
+
+public class PotData
+{
+    [JsonPropertyName("fate_id")]
+    public int FateId { get; set; }
+
+    [JsonPropertyName("spawn_time")]
+    public long SpawnTime { get; set; }
+
+    [JsonPropertyName("death_time")]
+    public long DeathTime { get; set; }
+
+    [JsonPropertyName("last_seen")]
+    public long LastSeen { get; set; }
+
+    [JsonPropertyName("respawn_times")]
+    public List<long> RespawnTimes { get; set; } = new();
+
+    [JsonPropertyName("killed_fates")]
+    public int KilledFates { get; set; }
+
+    [JsonPropertyName("killed_ces")]
+    public int KilledCes { get; set; }
+
+    [JsonPropertyName("state")]
+    public int State { get; set; }
+}

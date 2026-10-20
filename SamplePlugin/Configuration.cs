@@ -1,19 +1,32 @@
-﻿using Dalamud.Configuration;
-using System;
 
-namespace SamplePlugin;
+using System;
+using Dalamud.Configuration;
+using Dalamud.Plugin;
+
+namespace OccultTracker;
 
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 0;
+    public int Version { get; set; } = 1;
+
+    public bool ShowAether { get; set; } = true;
+    public bool ShowPrimal { get; set; } = true;
+    public bool ShowCrystal { get; set; } = true;
+    public bool ShowDynamis { get; set; } = true;
 
     public bool IsConfigWindowMovable { get; set; } = true;
-    public bool SomePropertyToBeSavedAndWithADefault { get; set; } = true;
 
-    // The below exists just to make saving less cumbersome
+    [NonSerialized]
+    private IDalamudPluginInterface? pluginInterface;
+
+    public void Initialize(IDalamudPluginInterface pluginInterface)
+    {
+        this.pluginInterface = pluginInterface;
+    }
+
     public void Save()
     {
-        Plugin.PluginInterface.SavePluginConfig(this);
+        pluginInterface?.SavePluginConfig(this);
     }
 }
