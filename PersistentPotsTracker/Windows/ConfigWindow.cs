@@ -3,14 +3,14 @@ using System.Numerics;
 using Dalamud.Interface.Windowing;
 using Dalamud.Bindings.ImGui;
 
-namespace OccultTracker.Windows;
+namespace PersistentPotsTracker.Windows;
 
 public class ConfigWindow : Window
 {
     private readonly Plugin plugin;
 
     public ConfigWindow(Plugin plugin)
-        : base("Occult Tracker Settings###OccultTrackerConfigWindow")
+        : base("Occult Tracker Settings###PersistentPotsTrackerConfigWindow")
     {
         this.plugin = plugin;
 

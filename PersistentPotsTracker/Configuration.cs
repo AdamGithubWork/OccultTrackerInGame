@@ -3,7 +3,7 @@ using System;
 using Dalamud.Configuration;
 using Dalamud.Plugin;
 
-namespace OccultTracker;
+namespace PersistentPotsTracker;
 
 [Serializable]
 public class Configuration : IPluginConfiguration

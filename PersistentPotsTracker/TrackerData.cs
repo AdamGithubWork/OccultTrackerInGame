@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace OccultTracker;
+namespace PersistentPotsTracker;
 
 public class TrackerData
 {

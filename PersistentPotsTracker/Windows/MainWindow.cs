@@ -4,15 +4,16 @@ using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
+using System.Collections.Generic;
 
-namespace OccultTracker.Windows;
+namespace PersistentPotsTracker.Windows;
 
 public class MainWindow : Window
 {
     private readonly Plugin plugin;
 
     public MainWindow(Plugin plugin)
-        : base("Occult Tracker###OccultTrackerMainWindow")
+        : base("Persistent Pots Tracker###PersistentPotsTrackerMainWindow")
     {
         this.plugin = plugin;
 
@@ -109,7 +110,6 @@ public class MainWindow : Window
         }
     }
 
-
     private void DrawPotTable()
     {
         var flags =
@@ -117,7 +117,9 @@ public class MainWindow : Window
             ImGuiTableFlags.RowBg |
             ImGuiTableFlags.Resizable |
             ImGuiTableFlags.ScrollY |
-            ImGuiTableFlags.SizingStretchProp;
+            ImGuiTableFlags.SizingStretchProp |
+            ImGuiTableFlags.Sortable |
+            ImGuiTableFlags.SortMulti;
 
         if (!ImGui.BeginTable("PotTimerTable", 4, flags))
             return;
@@ -125,129 +127,100 @@ public class MainWindow : Window
         ImGui.TableSetupColumn("Datacenter");
         ImGui.TableSetupColumn("Zone");
         ImGui.TableSetupColumn("Next Pot");
-        ImGui.TableSetupColumn("Countdown");
+
+        // Countdown ascending by default.
+        ImGui.TableSetupColumn(
+            "Countdown",
+            ImGuiTableColumnFlags.DefaultSort);
 
         ImGui.TableHeadersRow();
 
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        foreach (var tracker in plugin.Trackers)
+        // Build one display row per tracker.
+        var rows = plugin.PotRows.ToList();
+
+        // Read the current sorting selection.
+        var sortSpecs = ImGui.TableGetSortSpecs();
+
+        if (sortSpecs.SpecsCount > 0)
         {
-            var pots = tracker.GetPots();
-
-            var lastPot = pots
-                .Where(p => IsPotFate(p.FateId))
-                .Where(p => p.SpawnTime > 0)
-                .Where(p => p.SpawnTime <= now)
-                .OrderByDescending(p => p.SpawnTime)
-                .FirstOrDefault();
-
-            string zone = GetZoneName(tracker.Territory, pots);
-            string nextPot = "Unknown";
-            string countdown = "Waiting for first Pot";
-
-            long nextSpawnTime = 0;
-
-            if (lastPot != null)
+            // SortMulti allows multiple sort columns.
+            // Apply them from lowest to highest priority.
+            for (int i = sortSpecs.SpecsCount - 1; i >= 0; i--)
             {
-                int nextPotId = GetNextPotId(lastPot.FateId);
+                var spec = sortSpecs.Specs[i];
 
-                nextPot = nextPotId switch
+                bool ascending =
+                    spec.SortDirection == ImGuiSortDirection.Ascending;
+
+                rows = spec.ColumnIndex switch
                 {
-                    1976 or 2072 => "North",
-                    1977 or 2073 => "South",
-                    _ => "Unknown"
+                    0 => ascending
+                        ? rows.OrderBy(r => r.Datacenter).ToList()
+                        : rows.OrderByDescending(r => r.Datacenter).ToList(),
+
+                    1 => ascending
+                        ? rows.OrderBy(r => r.Zone).ToList()
+                        : rows.OrderByDescending(r => r.Zone).ToList(),
+
+                    2 => ascending
+                        ? rows.OrderBy(r => r.NextPot).ToList()
+                        : rows.OrderByDescending(r => r.NextPot).ToList(),
+
+                    3 => ascending
+                        ? rows.OrderBy(r => r.NextSpawnTime == 0
+                            ? long.MaxValue
+                            : r.NextSpawnTime).ToList()
+                        : rows.OrderByDescending(r => r.NextSpawnTime).ToList(),
+
+                    _ => rows
                 };
-
-                // 30 minutes after the previous Pot spawned.
-                nextSpawnTime = lastPot.SpawnTime + 1800;
-
-                long remaining = nextSpawnTime - now;
-
-                countdown = remaining > 0
-                    ? FormatCountdown(remaining)
-                    : "Ready / Overdue";
             }
+        }
 
+        foreach (var row in rows)
+        {
             ImGui.TableNextRow();
 
             ImGui.TableNextColumn();
-            ImGui.Text(GetDatacenterName(tracker.Datacenter));
+            ImGui.Text(row.Datacenter);
 
             ImGui.TableNextColumn();
-            ImGui.Text(zone);
+            ImGui.Text(row.Zone);
 
             ImGui.TableNextColumn();
-            ImGui.Text(nextPot);
+            ImGui.Text(row.NextPot);
 
             ImGui.TableNextColumn();
 
-            if (lastPot == null)
+            if (row.NextSpawnTime == 0)
             {
-                ImGui.TextDisabled(countdown);
+                ImGui.TextDisabled("Waiting for first Pot");
+                continue;
             }
-            else if (nextSpawnTime <= now)
+
+            long remaining = row.NextSpawnTime - now;
+
+            if (remaining <= 0)
             {
                 ImGui.TextColored(
                     new Vector4(0.3f, 1f, 0.3f, 1f),
-                    countdown);
+                    "Ready / Overdue");
             }
-            else if (nextSpawnTime - now <= 300)
+            else if (remaining <= 300)
             {
                 ImGui.TextColored(
                     new Vector4(1f, 0.8f, 0.2f, 1f),
-                    countdown);
+                    FormatCountdown(remaining));
             }
             else
             {
-                ImGui.Text(countdown);
+                ImGui.Text(FormatCountdown(remaining));
             }
         }
 
         ImGui.EndTable();
-    }
-
-
-    private static bool IsPotFate(int fateId)
-    {
-        return fateId is 1976 or 1977 or 2072 or 2073;
-    }
-
-    private static string GetPotName(int fateId)
-    {
-        return fateId switch
-        {
-            1976 => "Persistent Pots",
-            1977 => "Pleading Pots",
-            2072 => "Daylight Pottery",
-            2073 => "In a Pot of Bother",
-            _ => $"Unknown ({fateId})"
-        };
-    }
-
-    private static int GetNextPotId(int fateId)
-    {
-        return fateId switch
-        {
-            1976 => 1977,
-            1977 => 1976,
-            2072 => 2073,
-            2073 => 2072,
-            _ => 0
-        };
-    }
-
-    private static string GetZoneName(
-        int territory,
-        System.Collections.Generic.List<PotData> pots)
-    {
-        if (pots.Any(p => p.FateId is 1976 or 1977))
-            return "South Horn";
-
-        if (pots.Any(p => p.FateId is 2072 or 2073))
-            return "North Horn";
-
-        return $"Territory {territory}";
     }
 
     private static string FormatCountdown(long seconds)
@@ -266,35 +239,5 @@ public class MainWindow : Window
         }
 
         return $"{duration.Minutes:D2}:{duration.Seconds:D2}";
-    }
-
-    private static string FormatTimestamp(long timestamp)
-    {
-        if (timestamp <= 0)
-            return "Unknown";
-
-        try
-        {
-            return DateTimeOffset
-                .FromUnixTimeSeconds(timestamp)
-                .ToLocalTime()
-                .ToString("HH:mm:ss");
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            return "Invalid";
-        }
-    }
-
-    private static string GetDatacenterName(int id)
-    {
-        return id switch
-        {
-            4 => "Aether",
-            5 => "Primal",
-            8 => "Crystal",
-            11 => "Dynamis",
-            _ => $"Unknown ({id})"
-        };
     }
 }

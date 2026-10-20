@@ -6,20 +6,20 @@ using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
-using OccultTracker.Windows;
+using PersistentPotsTracker.Windows;
 
-namespace OccultTracker;
+namespace PersistentPotsTracker;
 
 public sealed class Plugin : IDalamudPlugin
 {
-    private const string CommandName = "/occulttracker";
+    private const string CommandName = "/pots";
 
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly ICommandManager commandManager;
     private readonly IFramework framework;
 
     private readonly WindowSystem windowSystem =
-        new("OccultTracker");
+        new("PersistentPotsTracker");
 
     private readonly MainWindow mainWindow;
     private readonly ConfigWindow configWindow;
@@ -29,7 +29,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly TrackerApiClient apiClient = new();
 
     public List<TrackerData> Trackers { get; private set; } = new();
-
+    public List<PotTableRow> PotRows { get; private set; } = new();
     public bool IsRefreshing { get; private set; }
     public string? ApiError { get; private set; }
 
@@ -101,7 +101,7 @@ public sealed class Plugin : IDalamudPlugin
         selectionVersion++;
 
         // Clear results from the previous selection.
-        Trackers = new();
+        PotRows = new();
 
         // Allow an immediate refresh.
         lastRefresh = DateTime.MinValue;
@@ -130,7 +130,7 @@ public sealed class Plugin : IDalamudPlugin
 
         if (datacenters.Count == 0)
         {
-            Trackers = new();
+            PotRows = new();
             ApiError = null;
             return;
         }
@@ -147,7 +147,11 @@ public sealed class Plugin : IDalamudPlugin
             if (disposed || requestVersion != selectionVersion)
                 return;
 
+            var rows = BuildPotRows(results);
+
             Trackers = results;
+            PotRows = rows;
+
             ApiError = null;
         }
         catch (Exception ex)
@@ -174,7 +178,76 @@ public sealed class Plugin : IDalamudPlugin
             _ = RefreshTrackersAsync();
         }
     }
+    private static List<PotTableRow> BuildPotRows(
+    List<TrackerData> trackers)
+{
+    var rows = new List<PotTableRow>();
 
+    long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+    foreach (var tracker in trackers)
+    {
+        var pots = tracker.GetPots();
+
+        PotData? lastPot = null;
+
+        foreach (var pot in pots)
+        {
+            if (pot.FateId is not (1976 or 1977 or 2072 or 2073))
+                continue;
+
+            if (pot.SpawnTime <= 0 || pot.SpawnTime > now)
+                continue;
+
+            if (lastPot == null ||
+                pot.SpawnTime > lastPot.SpawnTime)
+            {
+                lastPot = pot;
+            }
+        }
+
+        string zone = "Unknown";
+
+        if (pots.Exists(p => p.FateId is 1976 or 1977))
+            zone = "South Horn";
+        else if (pots.Exists(p => p.FateId is 2072 or 2073))
+            zone = "North Horn";
+
+        string nextPot = "Unknown";
+        long nextSpawnTime = 0;
+
+        if (lastPot != null)
+        {
+            nextPot = lastPot.FateId switch
+            {
+                1976 or 2072 => "South",
+                1977 or 2073 => "North",
+                _ => "Unknown"
+            };
+
+            nextSpawnTime = lastPot.SpawnTime + 1800;
+        }
+
+        string datacenter = tracker.Datacenter switch
+        {
+            4 => "Aether",
+            5 => "Primal",
+            8 => "Crystal",
+            11 => "Dynamis",
+            _ => $"Unknown ({tracker.Datacenter})"
+        };
+
+        rows.Add(new PotTableRow
+        {
+            Datacenter = datacenter,
+            Zone = zone,
+            NextPot = nextPot,
+            NextSpawnTime = nextSpawnTime
+        });
+    }
+
+    return rows;
+}
     public void Dispose()
     {
         disposed = true;
