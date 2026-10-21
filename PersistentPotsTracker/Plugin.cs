@@ -1,5 +1,4 @@
 
-
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -20,6 +19,9 @@ public sealed class Plugin : IDalamudPlugin
 
     private static readonly TimeSpan RefreshInterval =
         TimeSpan.FromSeconds(45);
+
+    private static readonly TimeSpan UnmatchedRefreshInterval =
+        TimeSpan.FromSeconds(5);
 
     private static readonly TimeSpan MatchInterval =
         TimeSpan.FromSeconds(2);
@@ -62,6 +64,7 @@ public sealed class Plugin : IDalamudPlugin
     private bool disposed;
     private bool wasWindowOpen;
     private bool refreshOnEntryPending;
+    private bool refreshAfterCurrentRequest;
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
@@ -110,6 +113,10 @@ public sealed class Plugin : IDalamudPlugin
 
         framework.Update += OnFrameworkUpdate;
         ClientState.TerritoryChanged += OnTerritoryChanged;
+
+        // Handle loading the plugin while already inside a Horn.
+        refreshOnEntryPending =
+            IsHornTerritory(ClientState.TerritoryType);
     }
 
     private void OnCommand(string command, string args)
@@ -179,18 +186,18 @@ public sealed class Plugin : IDalamudPlugin
                    StringComparison.OrdinalIgnoreCase);
     }
 
+    private bool IsInsideHorn()
+    {
+        return IsHornTerritory(ClientState.TerritoryType);
+    }
+
     private void OnTerritoryChanged(uint territoryId)
     {
-        // Never keep a previous instance highlighted
-        // after changing territories.
+        // Clear the previous instance when changing territories.
         SetMatchedTracker(null);
 
-        // Only entering North or South Horn triggers
-        // an extra API refresh.
-        if (!IsHornTerritory(territoryId))
-            return;
-
-        refreshOnEntryPending = true;
+        // Entering a Horn triggers an immediate API refresh.
+        refreshOnEntryPending = IsHornTerritory(territoryId);
     }
 
     public void DatacenterSelectionChanged()
@@ -203,7 +210,9 @@ public sealed class Plugin : IDalamudPlugin
         ApiError = null;
         lastRefresh = DateTime.MinValue;
 
-        if (!IsRefreshing)
+        if (IsRefreshing)
+            refreshAfterCurrentRequest = true;
+        else
             _ = RefreshTrackersAsync();
     }
 
@@ -246,9 +255,18 @@ public sealed class Plugin : IDalamudPlugin
             if (disposed || requestVersion != selectionVersion)
                 return;
 
-            Trackers = results;
-            PotRows = BuildPotRows(results);
-            ApiError = null;
+            // Preserve usable data if the API returns an empty result.
+            if (results.Count > 0)
+            {
+                Trackers = results;
+                PotRows = BuildPotRows(results);
+                ApiError = null;
+            }
+            else
+            {
+                ApiError = "The tracker API returned no instances.";
+                pluginLog.Warning(ApiError);
+            }
         }
         catch (Exception ex)
         {
@@ -267,6 +285,13 @@ public sealed class Plugin : IDalamudPlugin
                 lastRefresh = requestVersion == selectionVersion
                     ? DateTime.UtcNow
                     : DateTime.MinValue;
+
+                if (refreshAfterCurrentRequest ||
+                    requestVersion != selectionVersion)
+                {
+                    refreshAfterCurrentRequest = false;
+                    _ = RefreshTrackersAsync();
+                }
             }
         }
     }
@@ -276,6 +301,7 @@ public sealed class Plugin : IDalamudPlugin
         if (disposed)
             return;
 
+        // Check local FATEs and CEs every 2 seconds.
         if (DateTime.UtcNow - lastMatchCheck >= MatchInterval)
         {
             lastMatchCheck = DateTime.UtcNow;
@@ -285,8 +311,7 @@ public sealed class Plugin : IDalamudPlugin
         if (IsRefreshing)
             return;
 
-        // Refresh immediately when entering either Horn,
-        // even when the tracker window is closed.
+        // Refresh immediately when entering North or South Horn.
         if (refreshOnEntryPending)
         {
             refreshOnEntryPending = false;
@@ -301,8 +326,21 @@ public sealed class Plugin : IDalamudPlugin
 
         wasWindowOpen = isWindowOpen;
 
-        // No periodic API refreshes while the main
-        // tracker window is closed.
+        // Refresh every 5 seconds while inside a Horn
+        // until the current instance is identified.
+        if (IsInsideHorn() && MatchedTrackerId == null)
+        {
+            if (DateTime.UtcNow - lastRefresh >=
+                UnmatchedRefreshInterval)
+            {
+                _ = RefreshTrackersAsync();
+            }
+
+            return;
+        }
+
+        // Once matched, or outside a Horn, only refresh
+        // periodically while the main tracker window is open.
         if (isWindowOpen &&
             DateTime.UtcNow - lastRefresh >= RefreshInterval)
         {
@@ -328,7 +366,6 @@ public sealed class Plugin : IDalamudPlugin
     private unsafe HashSet<int> GetLocalCEIds()
     {
         var ids = new HashSet<int>();
-
         var container = DynamicEventContainer.GetInstance();
 
         if (container == null)
@@ -336,10 +373,7 @@ public sealed class Plugin : IDalamudPlugin
 
         foreach (ref var ce in container->Events)
         {
-            if (ce.DynamicEventId == 0)
-                continue;
-
-            if (ce.IsActive())
+            if (ce.DynamicEventId != 0 && ce.IsActive())
                 ids.Add(ce.DynamicEventId);
         }
 
@@ -357,46 +391,75 @@ public sealed class Plugin : IDalamudPlugin
         var localFates = GetLocalFateIds();
         var localCEs = GetLocalCEIds();
 
-        if (localFates.Count == 0 || localCEs.Count == 0)
+        if (localFates.Count == 0 && localCEs.Count == 0)
         {
             SetMatchedTracker(null);
             return;
         }
 
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string currentDatacenter = GetCurrentDatacenter();
 
-        var matches = new List<TrackerData>();
+        int currentDcId = currentDatacenter switch
+        {
+            "Aether" => 4,
+            "Primal" => 5,
+            "Crystal" => 8,
+            "Dynamis" => 11,
+            _ => 0
+        };
+
+        const long recentWindowSeconds = 600;
+
+        var scoredMatches =
+            new List<(int TrackerId, int Score)>();
 
         foreach (var tracker in Trackers)
         {
-            var apiFates = tracker.GetFates();
-            var apiCEs = tracker.GetEncounters();
+            if (currentDcId != 0 &&
+                tracker.Datacenter != currentDcId)
+                continue;
 
-            // Compare against the latest API FATE,
-            // rather than the entire historical list.
-            var latestFate = apiFates
-                .Where(f =>
-                    f.SpawnTime > 0 &&
-                    f.SpawnTime <= now)
-                .OrderByDescending(f => f.SpawnTime)
-                .FirstOrDefault();
+            bool fateMatch = tracker.GetFates().Any(f =>
+                localFates.Contains(f.FateId) &&
+                f.SpawnTime > 0 &&
+                f.SpawnTime <= now &&
+                now - f.SpawnTime <= recentWindowSeconds);
 
-            bool fateMatch =
-                latestFate != null &&
-                localFates.Contains(latestFate.FateId);
-
-            bool ceMatch = apiCEs.Any(ce =>
+            bool ceMatch = tracker.GetEncounters().Any(ce =>
                 localCEs.Contains(ce.FateId) &&
                 ce.SpawnTime > 0 &&
                 ce.SpawnTime <= now &&
-                ce.DeathTime == 0);
+                (ce.DeathTime == 0 ||
+                 ce.DeathTime > now - 120));
 
-            if (fateMatch && ceMatch)
-                matches.Add(tracker);
+            int score =
+                (fateMatch ? 1 : 0) +
+                (ceMatch ? 2 : 0);
+
+            if (score > 0)
+                scoredMatches.Add((tracker.Id, score));
         }
 
+        if (scoredMatches.Count == 0)
+        {
+            SetMatchedTracker(null);
+            return;
+        }
+
+        int bestScore =
+            scoredMatches.Max(m => m.Score);
+
+        var bestMatches = scoredMatches
+            .Where(m => m.Score == bestScore)
+            .ToList();
+
+        // Avoid highlighting the wrong instance
+        // if multiple trackers match equally well.
         SetMatchedTracker(
-            matches.Count == 1 ? matches[0].Id : null);
+            bestMatches.Count == 1
+                ? bestMatches[0].TrackerId
+                : null);
     }
 
     private void SetMatchedTracker(int? trackerId)
@@ -405,6 +468,9 @@ public sealed class Plugin : IDalamudPlugin
             return;
 
         MatchedTrackerId = trackerId;
+
+        pluginLog.Information(
+            $"INSTANCE MATCH: {trackerId?.ToString() ?? "NONE"}");
     }
 
     private string GetFateName(int fateId)
@@ -430,7 +496,8 @@ public sealed class Plugin : IDalamudPlugin
             return cached;
 
         var sheet =
-            dataManager.GetExcelSheet<Lumina.Excel.Sheets.DynamicEvent>();
+            dataManager.GetExcelSheet<
+                Lumina.Excel.Sheets.DynamicEvent>();
 
         var ce = sheet.GetRowOrDefault((uint)ceId);
 
@@ -488,9 +555,11 @@ public sealed class Plugin : IDalamudPlugin
     private List<PotTableRow> BuildPotRows(
         List<TrackerData> trackers)
     {
-        var rows = new List<PotTableRow>(trackers.Count);
+        var rows =
+            new List<PotTableRow>(trackers.Count);
 
-        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        long now =
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         foreach (var tracker in trackers)
         {
@@ -520,7 +589,8 @@ public sealed class Plugin : IDalamudPlugin
                         continue;
                 }
 
-                if (pot.SpawnTime <= 0 || pot.SpawnTime > now)
+                if (pot.SpawnTime <= 0 ||
+                    pot.SpawnTime > now)
                     continue;
 
                 if (lastPot == null ||
@@ -548,17 +618,19 @@ public sealed class Plugin : IDalamudPlugin
                     _ => "Unknown"
                 };
 
-                nextSpawnTime = lastPot.SpawnTime + 1800;
+                nextSpawnTime =
+                    lastPot.SpawnTime + 1800;
             }
 
-            string datacenter = tracker.Datacenter switch
-            {
-                4 => "Aether",
-                5 => "Primal",
-                8 => "Crystal",
-                11 => "Dynamis",
-                _ => $"Unknown ({tracker.Datacenter})"
-            };
+            string datacenter =
+                tracker.Datacenter switch
+                {
+                    4 => "Aether",
+                    5 => "Primal",
+                    8 => "Crystal",
+                    11 => "Dynamis",
+                    _ => $"Unknown ({tracker.Datacenter})"
+                };
 
             rows.Add(new PotTableRow
             {
