@@ -35,19 +35,24 @@ public class TrackerData
     [JsonPropertyName("encounter_history")]
     public string EncounterHistoryJson { get; set; } = "[]";
 
+    // Store parsed histories so we don't deserialize repeatedly.
+    private List<PotData>? cachedPots;
+    private List<PotData>? cachedFates;
+    private List<PotData>? cachedEncounters;
+
     public List<PotData> GetPots()
     {
-        return ParseHistory(PotHistoryJson);
+        return cachedPots ??= ParseHistory(PotHistoryJson);
     }
 
     public List<PotData> GetFates()
     {
-        return ParseHistory(FateHistoryJson);
+        return cachedFates ??= ParseHistory(FateHistoryJson);
     }
 
     public List<PotData> GetEncounters()
     {
-        return ParseHistory(EncounterHistoryJson);
+        return cachedEncounters ??= ParseHistory(EncounterHistoryJson);
     }
 
     private static List<PotData> ParseHistory(string json)
