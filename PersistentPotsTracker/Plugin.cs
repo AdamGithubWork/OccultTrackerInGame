@@ -1,4 +1,3 @@
-
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -20,7 +19,7 @@ public sealed class Plugin : IDalamudPlugin
     private static readonly TimeSpan RefreshInterval =
         TimeSpan.FromSeconds(45);
 
-    private static readonly TimeSpan UnmatchedRefreshInterval =
+    private static readonly TimeSpan MatchRetryDelay =
         TimeSpan.FromSeconds(5);
 
     private static readonly TimeSpan MatchInterval =
@@ -65,6 +64,11 @@ public sealed class Plugin : IDalamudPlugin
     private bool wasWindowOpen;
     private bool refreshOnEntryPending;
     private bool refreshAfterCurrentRequest;
+    private DateTime? scheduledMatchRefresh;
+    private bool awaitingMatchRetry;
+    private bool hasActivitySnapshot;
+    private HashSet<int> previousFateIds = new();
+    private HashSet<int> previousCeIds = new();
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
@@ -117,6 +121,9 @@ public sealed class Plugin : IDalamudPlugin
         // Handle loading the plugin while already inside a Horn.
         refreshOnEntryPending =
             IsHornTerritory(ClientState.TerritoryType);
+
+        if (refreshOnEntryPending)
+            scheduledMatchRefresh = DateTime.UtcNow + MatchRetryDelay;
     }
 
     private void OnCommand(string command, string args)
@@ -198,6 +205,15 @@ public sealed class Plugin : IDalamudPlugin
 
         // Entering a Horn triggers an immediate API refresh.
         refreshOnEntryPending = IsHornTerritory(territoryId);
+
+        scheduledMatchRefresh = refreshOnEntryPending
+            ? DateTime.UtcNow + MatchRetryDelay
+            : null;
+
+        awaitingMatchRetry = false;
+        hasActivitySnapshot = false;
+        previousFateIds.Clear();
+        previousCeIds.Clear();
     }
 
     public void DatacenterSelectionChanged()
@@ -301,20 +317,32 @@ public sealed class Plugin : IDalamudPlugin
         if (disposed)
             return;
 
-        // Check local FATEs and CEs every 2 seconds.
-        if (DateTime.UtcNow - lastMatchCheck >= MatchInterval)
+        var now = DateTime.UtcNow;
+        bool insideHorn = IsInsideHorn();
+
+        // Local activity checks are cheap and do not require an API request.
+        if (insideHorn && now - lastMatchCheck >= MatchInterval)
         {
-            lastMatchCheck = DateTime.UtcNow;
+            lastMatchCheck = now;
+            CheckLocalActivity();
             TryMatchCurrentInstance();
         }
 
         if (IsRefreshing)
             return;
 
-        // Refresh immediately when entering North or South Horn.
         if (refreshOnEntryPending)
         {
             refreshOnEntryPending = false;
+            _ = RefreshTrackersAsync();
+            return;
+        }
+
+        if (insideHorn && scheduledMatchRefresh.HasValue &&
+            now >= scheduledMatchRefresh.Value)
+        {
+            scheduledMatchRefresh = null;
+            awaitingMatchRetry = false;
             _ = RefreshTrackersAsync();
             return;
         }
@@ -326,26 +354,42 @@ public sealed class Plugin : IDalamudPlugin
 
         wasWindowOpen = isWindowOpen;
 
-        // Refresh every 5 seconds while inside a Horn
-        // until the current instance is identified.
-        if (IsInsideHorn() && MatchedTrackerId == null)
-        {
-            if (DateTime.UtcNow - lastRefresh >=
-                UnmatchedRefreshInterval)
-            {
-                _ = RefreshTrackersAsync();
-            }
+        // Preserve periodic timer updates while the main window is open.
+        if (isWindowOpen && now - lastRefresh >= RefreshInterval)
+            _ = RefreshTrackersAsync();
+    }
 
+    private void CheckLocalActivity()
+    {
+        var currentFates = GetLocalFateIds();
+        var currentCes = GetLocalCEIds();
+
+        if (!hasActivitySnapshot)
+        {
+            previousFateIds = currentFates;
+            previousCeIds = currentCes;
+            hasActivitySnapshot = true;
             return;
         }
 
-        // Once matched, or outside a Horn, only refresh
-        // periodically while the main tracker window is open.
-        if (isWindowOpen &&
-            DateTime.UtcNow - lastRefresh >= RefreshInterval)
-        {
+        bool newActivity = currentFates.Except(previousFateIds).Any() ||
+                           currentCes.Except(previousCeIds).Any();
+
+        previousFateIds = currentFates;
+        previousCeIds = currentCes;
+
+        if (!newActivity || MatchedTrackerId.HasValue)
+            return;
+
+        // Fetch now; if the external API hasn't caught up, retry in 5s.
+        // A new spawn resets the retry window.
+        scheduledMatchRefresh = DateTime.UtcNow + MatchRetryDelay;
+        awaitingMatchRetry = true;
+
+        if (IsRefreshing)
+            refreshAfterCurrentRequest = true;
+        else
             _ = RefreshTrackersAsync();
-        }
     }
 
     private HashSet<int> GetLocalFateIds()
@@ -468,6 +512,12 @@ public sealed class Plugin : IDalamudPlugin
             return;
 
         MatchedTrackerId = trackerId;
+
+        if (trackerId.HasValue && awaitingMatchRetry)
+        {
+            scheduledMatchRefresh = null;
+            awaitingMatchRetry = false;
+        }
 
         pluginLog.Information(
             $"INSTANCE MATCH: {trackerId?.ToString() ?? "NONE"}");
