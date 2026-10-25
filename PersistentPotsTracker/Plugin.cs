@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
@@ -44,6 +46,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly PotOverlayWindow potOverlayWindow;
 
     private readonly TrackerApiClient apiClient = new();
+    private readonly CancellationTokenSource apiCancellation = new();
 
     private readonly Dictionary<int, string> fateNameCache = new();
     private readonly Dictionary<int, string> ceNameCache = new();
@@ -268,7 +271,8 @@ public sealed class Plugin : IDalamudPlugin
         try
         {
             var results =
-                await apiClient.GetTrackersAsync(datacenters);
+                await apiClient.GetTrackersAsync(
+                    datacenters, apiCancellation.Token);
 
             if (disposed || requestVersion != selectionVersion ||
                 requestTerritoryVersion != territoryVersion)
@@ -287,6 +291,29 @@ public sealed class Plugin : IDalamudPlugin
                 pluginLog.Warning(ApiError);
             }
         }
+        catch (OperationCanceledException)
+            when (apiCancellation.IsCancellationRequested)
+        {
+            // Normal cancellation during plugin shutdown.
+        }
+        catch (OperationCanceledException)
+        {
+            if (!disposed && requestVersion == selectionVersion &&
+                requestTerritoryVersion == territoryVersion)
+            {
+                ApiError = "Tracker API request timed out.";
+                pluginLog.Warning(ApiError);
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            if (!disposed && requestVersion == selectionVersion &&
+                requestTerritoryVersion == territoryVersion)
+            {
+                ApiError = ex.Message;
+                pluginLog.Warning(ex, "Tracker API request failed.");
+            }
+        }
         catch (Exception ex)
         {
             if (!disposed && requestVersion == selectionVersion &&
@@ -299,7 +326,11 @@ public sealed class Plugin : IDalamudPlugin
         finally
         {
             IsRefreshing = false;
-            if (!disposed)
+            if (disposed)
+            {
+                apiCancellation.Dispose();
+            }
+            else
             {
                 if (requestVersion == selectionVersion &&
                     requestTerritoryVersion == territoryVersion)
@@ -698,7 +729,11 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        if (disposed)
+            return;
+
         disposed = true;
+        apiCancellation.Cancel();
 
         framework.Update -= OnFrameworkUpdate;
         ClientState.TerritoryChanged -= OnTerritoryChanged;
@@ -712,5 +747,9 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.RemoveAllWindows();
 
         apiClient.Dispose();
+
+        // An in-flight request releases the token source in its finally block.
+        if (!IsRefreshing)
+            apiCancellation.Dispose();
     }
 }
