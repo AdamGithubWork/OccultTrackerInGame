@@ -426,20 +426,18 @@ public sealed class Plugin : IDalamudPlugin
 
     private void TryMatchCurrentInstance()
     {
-        if (Trackers.Count == 0)
-        {
-            SetMatchedTracker(null);
+        // Once matched, keep the instance until leaving the Horn.
+        if (MatchedTrackerId.HasValue)
             return;
-        }
+
+        if (Trackers.Count == 0)
+            return;
 
         var localFates = GetLocalFateIds();
         var localCEs = GetLocalCEIds();
 
         if (localFates.Count == 0 && localCEs.Count == 0)
-        {
-            SetMatchedTracker(null);
             return;
-        }
 
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         string currentDatacenter = GetCurrentDatacenter();
@@ -486,10 +484,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         if (scoredMatches.Count == 0)
-        {
-            SetMatchedTracker(null);
             return;
-        }
 
         int bestScore =
             scoredMatches.Max(m => m.Score);
@@ -498,12 +493,11 @@ public sealed class Plugin : IDalamudPlugin
             .Where(m => m.Score == bestScore)
             .ToList();
 
-        // Avoid highlighting the wrong instance
-        // if multiple trackers match equally well.
-        SetMatchedTracker(
-            bestMatches.Count == 1
-                ? bestMatches[0].TrackerId
-                : null);
+        // Only identify the instance if there is one clear match.
+        if (bestMatches.Count == 1)
+        {
+            SetMatchedTracker(bestMatches[0].TrackerId);
+        }
     }
 
     private void SetMatchedTracker(int? trackerId)
