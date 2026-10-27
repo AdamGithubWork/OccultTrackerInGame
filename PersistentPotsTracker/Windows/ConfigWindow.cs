@@ -1,7 +1,7 @@
 
-using System.Numerics;
-using Dalamud.Interface.Windowing;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Windowing;
+using System.Numerics;
 
 namespace PersistentPotsTracker.Windows;
 
